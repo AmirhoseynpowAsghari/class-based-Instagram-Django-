@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from django.contrib.auth.models import User
-
+from django.db.models import Q
 
 from django.db.models.signals import post_save, post_delete
 from django.utils.text import slugify
@@ -40,6 +40,13 @@ class PostFileContent(models.Model):
 	user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='content_owner')
 	file = models.FileField(upload_to=user_directory_path)
 
+
+'''
+Using a ManyToManyField in your Post model for the content field suggests that each post
+can have multiple files associated with it, and each file can be associated with multiple
+posts. If this is not the intended behavior, then the use of ManyToManyField is 
+inappropriate.
+'''
 class Post(models.Model):
 	id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 	content =  models.ManyToManyField(PostFileContent, related_name='contents')
@@ -77,18 +84,24 @@ class Follow(models.Model):
 		notify.delete()
 
 class Stream(models.Model):
-    following = models.ForeignKey(User, on_delete=models.CASCADE,null=True, related_name='stream_following')
+    following = models.ForeignKey(User, on_delete=models.CASCADE, null=True, related_name='stream_following')
     user = models.ForeignKey(User, on_delete=models.CASCADE)   
     post = models.ForeignKey(Post, on_delete=models.CASCADE, null=True)
     date = models.DateTimeField()
 
     def add_post(sender, instance, *args, **kwargs):
-    	post = instance
-    	user = post.user
-    	followers = Follow.objects.all().filter(following=user)
-    	for follower in followers:
-    		stream = Stream(post=post, user=follower.follower, date=post.posted, following=user)
-    		stream.save()
+        post = instance
+        user = post.user
+        followers = Follow.objects.filter(following=user)
+        
+        for follower in followers:
+            # Check if a similar Stream object already exists
+            existing_stream = Stream.objects.filter(Q(user=follower.follower) & Q(post=post))
+            
+            if not existing_stream.exists():
+                stream = Stream(post=post, user=follower.follower, date=post.posted, following=user)
+                stream.save()
+
 
 class Likes(models.Model):
 	user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='user_like')

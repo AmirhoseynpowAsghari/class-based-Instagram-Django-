@@ -15,8 +15,15 @@ from django.urls import reverse
 from django.core.paginator import Paginator
 
 from django.urls import resolve
+from django.db.models import Q
 
-# Create your views here.
+
+from django.urls import reverse_lazy
+from django.views.generic.edit import CreateView
+from django.contrib.auth.views import PasswordChangeView
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.views.generic import UpdateView, DetailView, ListView, View
+
 def UserProfile(request, username):
 	user = get_object_or_404(User, username=username)
 	profile = Profile.objects.get(user=user)
@@ -55,6 +62,52 @@ def UserProfile(request, username):
 
 	return HttpResponse(template.render(context, request))
 
+class UserProfileView(DetailView):
+    model = User
+    template_name = 'profile.html'
+    context_object_name = 'profile'
+    slug_url_kwarg = "username"
+    slug_field = "username"
+
+    def get_object(self, queryset=None):
+        username = self.kwargs.get(self.slug_url_kwarg)
+        return get_object_or_404(self.model, username=username)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        user = self.object
+        url_name = resolve(self.request.path).url_name
+        
+        if url_name == 'profile':
+            posts = Post.objects.filter(user=user).order_by('-posted')
+        else:
+            profile = self.object.profile
+            posts = profile.favorites.all()
+
+        # Profile info box
+        posts_count = Post.objects.filter(user=user).count()
+        following_count = Follow.objects.filter(follower=user).count()
+        followers_count = Follow.objects.filter(following=user).count()
+
+        # Follow status
+        follow_status = Follow.objects.filter(following=user, follower=self.request.user).exists()
+
+        # Pagination
+        paginator = Paginator(posts, 8)
+        page_number = self.request.GET.get('page')
+        posts_paginator = paginator.get_page(page_number)
+
+        context.update({
+            'posts': posts_paginator,
+            'following_count': following_count,
+            'followers_count': followers_count,
+            'posts_count': posts_count,
+            'follow_status': follow_status,
+            'url_name': url_name,
+        })
+        return context
+
+
 def UserProfileFavorites(request, username):
 	user = get_object_or_404(User, username=username)
 	profile = Profile.objects.get(user=user)
@@ -84,94 +137,96 @@ def UserProfileFavorites(request, username):
 	return HttpResponse(template.render(context, request))
 
 
-def Signup(request):
-	if request.method == 'POST':
-		form = SignupForm(request.POST)
-		if form.is_valid():
-			username = form.cleaned_data.get('username')
-			email = form.cleaned_data.get('email')
-			password = form.cleaned_data.get('password')
-			User.objects.create_user(username=username, email=email, password=password)
-			return redirect('index')
-	else:
-		form = SignupForm()
-	
-	context = {
-		'form':form,
-	}
+class SignupView(CreateView):
+    template_name = 'signup.html'
+    form_class = SignupForm
+    success_url = reverse_lazy('index')
 
-	return render(request, 'signup.html', context)
+    def dispatch(self, request, *args, **kwargs):
+        if request.user.is_authenticated:
+            return redirect('index')
+        return super().dispatch(request, *args, **kwargs) 
+
+    def form_valid(self, form):
+        username = form.cleaned_data.get('username')
+        email = form.cleaned_data.get('email')
+        password = form.cleaned_data.get('password')
+        form.instance.username = username
+        form.instance.email = email
+        form.instance.set_password(password)
+        return super().form_valid(form)
 
 
-@login_required
-def PasswordChange(request):
-	user = request.user
-	if request.method == 'POST':
-		form = ChangePasswordForm(request.POST)
-		if form.is_valid():
-			new_password = form.cleaned_data.get('new_password')
-			user.set_password(new_password)
-			user.save()
-			update_session_auth_hash(request, user)
-			return redirect('change_password_done')
-	else:
-		form = ChangePasswordForm(instance=user)
+class CustomPasswordChangeView(LoginRequiredMixin, PasswordChangeView):
+    form_class = ChangePasswordForm
+    template_name = 'change_password.html'
+    success_url = reverse_lazy('index')
 
-	context = {
-		'form':form,
-	}
+    def form_valid(self, form):
+        # Update the user's password
+        new_password = form.cleaned_data['new_password']
+        self.request.user.set_password(new_password)
+        self.request.user.save()
 
-	return render(request, 'change_password.html', context)
+        # Update the session auth hash to prevent the user from being logged out
+        update_session_auth_hash(self.request, self.request.user)
+
+        # Call the parent class's form_valid method to handle the rest
+        return super().form_valid(form)
+
 
 def PasswordChangeDone(request):
 	return render(request, 'change_password_done.html')
 
+class EditProfileView(LoginRequiredMixin, UpdateView):
+    model = Profile
+    form_class = EditProfileForm
+    template_name = 'edit_profile.html'
+    success_url = reverse_lazy('index')
 
-@login_required
-def EditProfile(request):
-	user = request.user.id
-	profile = Profile.objects.get(user__id=user)
-	BASE_WIDTH = 400
+    def get_object(self, queryset=None):
+        return self.request.user.profile
 
-	if request.method == 'POST':
-		form = EditProfileForm(request.POST, request.FILES)
-		if form.is_valid():
-			profile.picture = form.cleaned_data.get('picture')
-			profile.first_name = form.cleaned_data.get('first_name')
-			profile.last_name = form.cleaned_data.get('last_name')
-			profile.location = form.cleaned_data.get('location')
-			profile.url = form.cleaned_data.get('url')
-			profile.profile_info = form.cleaned_data.get('profile_info')
-			profile.save()
-			return redirect('index')
-	else:
-		form = EditProfileForm()
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        # Additional logic if needed
+        return response
 
-	context = {
-		'form':form,
-	}
+class FollowView(LoginRequiredMixin, View):
 
-	return render(request, 'edit_profile.html', context)
+    def dispatch(self, *args, **kwargs):
+        return super().dispatch(*args, **kwargs)
+
+    def get(self, request, username, option):
+        following = get_object_or_404(User, username=username)
+
+        try:
+            f, created = Follow.objects.get_or_create(follower=request.user, following=following)
+
+            if int(option) == 0:
+                f.delete()
+                Stream.objects.filter(following=following, user=request.user).all().delete()
+            else:
+                posts = Post.objects.all().filter(user=following)[:25]
+
+                with transaction.atomic():
+                    for post in posts:
+                        stream = Stream(post=post, user=request.user, date=post.posted, following=following)
+                        stream.save()
+
+            return HttpResponseRedirect(reverse('profile', args=[username]))
+        except User.DoesNotExist:
+            return HttpResponseRedirect(reverse('profile', args=[username]))
+
+class UserSearch(LoginRequiredMixin, ListView):
+    template_name = 'follow_search.html'
+    context_object_name = 'users'
+    paginate_by = 6
+
+    def get_queryset(self):
+        query = self.request.GET.get("q")
+        if query:
+            return User.objects.filter(Q(username__icontains=query))
+        return User.objects.none()
 
 
-@login_required
-def follow(request, username, option):
-	following = get_object_or_404(User, username=username)
-
-	try:
-		f, created = Follow.objects.get_or_create(follower=request.user, following=following)
-
-		if int(option) == 0:
-			f.delete()
-			Stream.objects.filter(following=following, user=request.user).all().delete()
-		else:
-			 posts = Post.objects.all().filter(user=following)[:25]
-
-			 with transaction.atomic():
-			 	for post in posts:
-			 		stream = Stream(post=post, user=request.user, date=post.posted, following=following)
-			 		stream.save()
-
-		return HttpResponseRedirect(reverse('profile', args=[username]))
-	except User.DoesNotExist:
-		return HttpResponseRedirect(reverse('profile', args=[username]))

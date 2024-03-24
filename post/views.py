@@ -1,4 +1,4 @@
-from django.shortcuts import render, get_object_or_404, redirect
+from django.shortcuts import render, get_object_or_404
 from django.http import HttpResponse, HttpResponseRedirect
 from django.template import loader
 
@@ -9,168 +9,139 @@ from stories.models import Story, StoryStream
 from comment.models import Comment
 from comment.forms import CommentForm
 
-
-from django.contrib.auth.decorators import login_required
-
 from django.urls import reverse
 from authy.models import Profile
 
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.views.generic import ListView, FormView
+from django.views import View
 
+class IndexView(LoginRequiredMixin, ListView):
+    template_name = 'index.html'
+    context_object_name = 'post_items'
+    queryset = Post.objects.none()  # Empty initial queryset
 
-# Create your views here.
-@login_required
-def index(request):
-	user = request.user
-	posts = Stream.objects.filter(user=user)
+    def get_queryset(self):
+        user = self.request.user
+        posts = Stream.objects.filter(user=user)
+        group_ids = [post.post_id for post in posts]
+        return Post.objects.filter(id__in=group_ids).order_by('-posted')
 
-	stories = StoryStream.objects.filter(user=user)
-
-
-	group_ids = []
-
-	for post in posts:
-		group_ids.append(post.post_id)
-		
-	post_items = Post.objects.filter(id__in=group_ids).all().order_by('-posted')		
-
-	template = loader.get_template('index.html')
-
-	context = {
-		'post_items': post_items,
-		'stories': stories,
-
-	}
-
-	return HttpResponse(template.render(context, request))
-
-def PostDetails(request, post_id):
-	post = get_object_or_404(Post, id=post_id)
-	user = request.user
-	profile = Profile.objects.get(user=user)
-	favorited = False
-
-	#comment
-	comments = Comment.objects.filter(post=post).order_by('date')
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        user = self.request.user
+        context['stories'] = StoryStream.objects.filter(user=user)
+        return context
 	
-	if request.user.is_authenticated:
-		profile = Profile.objects.get(user=user)
-		#For the color of the favorite button
+class NewPostView(LoginRequiredMixin, FormView):
+    template_name = 'newpost.html'
+    form_class = NewPostForm
+    success_url = '/post'
 
-		if profile.favorites.filter(id=post_id).exists():
-			favorited = True
+    def form_valid(self, form):
+        user = self.request.user
+        tags_objs = []
+        files_objs = []
 
-	#Comments Form
-	if request.method == 'POST':
-		form = CommentForm(request.POST)
-		if form.is_valid():
-			comment = form.save(commit=False)
-			comment.post = post
-			comment.user = user
-			comment.save()
-			return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
-	else:
-		form = CommentForm()
+        files = self.request.FILES.getlist('content')
+        caption = form.cleaned_data.get('caption')
+        tags_form = form.cleaned_data.get('tags')
 
+        tags_list = list(tags_form.split(','))
 
-	template = loader.get_template('post_detail.html')
+        for tag in tags_list:
+            t, created = Tag.objects.get_or_create(title=tag)
+            tags_objs.append(t)
 
-	context = {
-		'post':post,
-		'favorited':favorited,
-		'profile':profile,
-		'form':form,
-		'comments':comments,
-	}
+        for file in files:
+            file_instance = PostFileContent(file=file, user=user)
+            file_instance.save()
+            files_objs.append(file_instance)
 
-	return HttpResponse(template.render(context, request))
+        p, created = Post.objects.get_or_create(caption=caption, user=user)
+        p.tags.set(tags_objs)
+        p.content.set(files_objs)
+        p.save()
+        return super().form_valid(form)
 
+class PostDetailsView(LoginRequiredMixin, View):
+    template_name = 'post_detail.html'
+    comment_form_class = CommentForm
 
-@login_required
-def NewPost(request):
-	user = request.user
-	tags_objs = []
-	files_objs = []
+    def get_context_data(self, post_id):
+        post = get_object_or_404(Post, id=post_id)
+        user = self.request.user
+        profile = get_object_or_404(Profile, user=user)
+        favorited = profile.favorites.filter(id=post_id).exists() if user.is_authenticated else False
+        comments = Comment.objects.filter(post=post).order_by('date')
+        return {
+            'post': post,
+            'favorited': favorited,
+            'profile': profile,
+            'form': self.comment_form_class(),
+            'comments': comments,
+        }
 
-	if request.method == 'POST':
-		form = NewPostForm(request.POST, request.FILES)
-		if form.is_valid():
-			files = request.FILES.getlist('content')
-			caption = form.cleaned_data.get('caption')
-			tags_form = form.cleaned_data.get('tags')
+    def get(self, request, post_id):
+        context = self.get_context_data(post_id)
+        return render(request, self.template_name, context)
 
-			tags_list = list(tags_form.split(','))
+    def post(self, request, post_id):
+        form = self.comment_form_class(request.POST)
+        if form.is_valid():
+            post = get_object_or_404(Post, id=post_id)
+            user = self.request.user
+            profile = get_object_or_404(Profile, user=user)
+            comment = form.save(commit=False)
+            comment.post = post
+            comment.user = user
+            comment.save()
+            return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
+        else:
+            context = self.get_context_data(post_id)
+            context['form'] = form
+            return render(request, self.template_name, context)
 
-			for tag in tags_list:
-				t, created = Tag.objects.get_or_create(title=tag)
-				tags_objs.append(t)
+class TagsView(LoginRequiredMixin, View):
+    def get(self, request, tag_slug):
+        tag = get_object_or_404(Tag, slug=tag_slug)
+        posts = Post.objects.filter(tags=tag).order_by('-posted')
+        context = {
+            'posts': posts,
+            'tag': tag,
+        }
+        template = loader.get_template('tag.html')
+        return HttpResponse(template.render(context, request))
 
-			for file in files:
-				file_instance = PostFileContent(file=file, user=user)
-				file_instance.save()
-				files_objs.append(file_instance)
+class LikeView(LoginRequiredMixin, View):
+    def post(self, request, post_id):
+        user = request.user
+        post = get_object_or_404(Post, id=post_id)
+        current_likes = post.likes
+        liked = Likes.objects.filter(user=user, post=post).count()
 
-			p, created = Post.objects.get_or_create(caption=caption, user=user)
-			p.tags.set(tags_objs)
-			p.content.set(files_objs)
-			p.save()
-			return redirect('index')
-	else:
-		form = NewPostForm()
+        if not liked:
+            like = Likes.objects.create(user=user, post=post)
+            current_likes += 1
+        else:
+            Likes.objects.filter(user=user, post=post).delete()
+            current_likes -= 1
 
-	context = {
-		'form':form,
-	}
+        post.likes = current_likes
+        post.save()
 
-	return render(request, 'newpost.html', context)
+        return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
+    
+class FavoriteView(LoginRequiredMixin, View):
+    def post(self, request, post_id):
+        user = request.user
+        post = get_object_or_404(Post, id=post_id)
+        profile = get_object_or_404(Profile, user=user)
 
-def tags(request, tag_slug):
-	tag = get_object_or_404(Tag, slug=tag_slug)
-	posts = Post.objects.filter(tags=tag).order_by('-posted')
+        if profile.favorites.filter(id=post_id).exists():
+            profile.favorites.remove(post)
+        else:
+            profile.favorites.add(post)
 
-	template = loader.get_template('tag.html')
-
-	context = {
-		'posts':posts,
-		'tag':tag,
-	}
-
-	return HttpResponse(template.render(context, request))
-
-
-
-@login_required
-def like(request, post_id):
-	user = request.user
-	post = Post.objects.get(id=post_id)
-	current_likes = post.likes
-	liked = Likes.objects.filter(user=user, post=post).count()
-
-	if not liked:
-		like = Likes.objects.create(user=user, post=post)
-		#like.save()
-		current_likes = current_likes + 1
-
-	else:
-		Likes.objects.filter(user=user, post=post).delete()
-		current_likes = current_likes - 1
-
-	post.likes = current_likes
-	post.save()
-
-	return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
-
-@login_required
-def favorite(request, post_id):
-	user = request.user
-	post = Post.objects.get(id=post_id)
-	profile = Profile.objects.get(user=user)
-
-	if profile.favorites.filter(id=post_id).exists():
-		profile.favorites.remove(post)
-
-	else:
-		profile.favorites.add(post)
-
-	return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
-
+        return HttpResponseRedirect(reverse('postdetails', args=[post_id]))
 

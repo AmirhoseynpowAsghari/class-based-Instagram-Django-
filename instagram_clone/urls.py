@@ -18,7 +18,7 @@ from django.urls import path, include
 from django.conf.urls.static import static
 from django.conf import settings
 
-from authy.views import UserProfile, UserProfileFavorites, follow
+from authy.views import UserProfile, UserProfileFavorites, FollowView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -29,6 +29,6 @@ urlpatterns = [
     path('notifications/', include('notifications.urls')),
     path('<username>/', UserProfile, name='profile'),
     path('<username>/saved', UserProfile, name='profilefavorites'),
-    path('<username>/follow/<option>', follow, name='follow'),
+    path('<username>/follow/<option>', FollowView.as_view(), name='follow'),
 
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

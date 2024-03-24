@@ -14,9 +14,10 @@ def user_directory_path(instance, filename):
     full_path = os.path.join(settings.MEDIA_ROOT, profile_pic_name)
 
     if os.path.exists(full_path):
-    	os.remove(full_path)
+        os.remove(full_path)
 
     return profile_pic_name
+
 
 # Create your models here.
 class Profile(models.Model):
@@ -30,6 +31,10 @@ class Profile(models.Model):
 	favorites = models.ManyToManyField(Post)
 	picture = models.ImageField(upload_to=user_directory_path, blank=True, null=True, verbose_name='Picture')
 
+	@property
+	def username(self):
+		self.user.username
+		
 	def save(self, *args, **kwargs):
 		super().save(*args, **kwargs)
 		SIZE = 250, 250
